@@ -1,0 +1,47 @@
+name: Prod Release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    outputs:
+      summary: ${{ steps.sum.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform -chdir=infra init
+      - run: terraform -chdir=infra plan -var="release=${GITHUB_REF_NAME}" -no-color | tee plan.txt
+      - id: sum
+        run: echo "summary=$(grep '^Plan:' plan.txt)" >> "$GITHUB_OUTPUT"
+
+  change:
+    name: ServiceNow Change
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ServiceNow/servicenow-devops-change@v6.1.0
+        with:
+          devops-integration-token: ${{ secrets.SN_DEVOPS_INTEGRATION_TOKEN }}
+          instance-url: ${{ secrets.SN_INSTANCE_URL }}
+          tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
+          context-github: ${{ toJSON(github) }}
+          job-name: 'ServiceNow Change'
+          change-request: '{"setCloseCode":"true","autoCloseChange":true,"attributes":{"short_description":"Production release ${{ github.ref_name }}","description":"Terraform ${{ needs.plan.outputs.summary }}","assignment_group":"87d8f3fcc33c57906aff75dc0501317b"}}'
+          interval: '30'
+          timeout: '3600'
+          changeCreationTimeOut: '3600'
+          abortOnChangeCreationFailure: true
+          abortOnChangeStepTimeout: true
+
+  apply:
+    name: Terraform Apply
+    needs: change
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform -chdir=infra init
+      - run: terraform -chdir=infra apply -auto-approve -var="release=${GITHUB_REF_NAME}"
