@@ -5,8 +5,7 @@ on:
 
 env:
   # Allowed primary CIs: key -> exact CI name in ServiceNow
-  CI_MAP: '{"app":"CC Order Service - Prod","aks":"aks-cc-order-prod-eus2","rg":"rg-cc-order-prod-eus2","gcp":"cc-order-analytics-prod"}'
-
+   CI_MAP: '{"app":"CC Order Service - Prod","aks":"aks-cc-order-prod-eus2-userpool","rg":"rg-cc-order-prod-eus2","gcp":"cc-order-analytics-prod"}'
 jobs:
   plan:
     name: Terraform Plan
