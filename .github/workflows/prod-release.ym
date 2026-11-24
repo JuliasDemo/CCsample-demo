@@ -30,13 +30,16 @@ jobs:
           context-github: ${{ toJSON(github) }}
           job-name: 'ServiceNow Change'
           change-request: '{"setCloseCode":"true","autoCloseChange":true,"attributes":{"short_description":"Production release ${{ github.ref_name }}","description":"Terraform ${{ needs.plan.outputs.summary }}","assignment_group":"YOUR_GROUP_SYS_ID"}}'
-          deployment-gate: '{"environment":"production","jobName":"Terraform Apply"}'
+          interval: '30'
+          timeout: '3600'
+          changeCreationTimeOut: '3600'
+          abortOnChangeCreationFailure: true
+          abortOnChangeStepTimeout: true
 
   apply:
     name: Terraform Apply
     needs: change
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
