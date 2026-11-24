@@ -3,14 +3,32 @@ on:
   push:
     tags: ['v*']
 
+env:
+  # Allowed primary CIs: key -> exact CI name in ServiceNow
+  CI_MAP: '{"app":"CC Order Service - Prod","aks":"aks-cc-order-prod-eus2","rg":"rg-cc-order-prod-eus2","gcp":"cc-order-analytics-prod"}'
+
 jobs:
   plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
     outputs:
       summary: ${{ steps.sum.outputs.summary }}
+      ci_name: ${{ steps.ci.outputs.ci_name }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolve primary CI
+        id: ci
+        run: |
+          TARGET=$(tr -d '[:space:]' < deploy-target.txt)
+          CI_NAME=$(echo "$CI_MAP" | jq -r --arg t "$TARGET" '.[$t] // empty')
+          if [ -z "$CI_NAME" ]; then
+            echo "::error::Unknown deploy target '$TARGET'. Allowed values: $(echo "$CI_MAP" | jq -r 'keys | join(", ")')"
+            exit 1
+          fi
+          echo "Primary CI: $CI_NAME"
+          echo "ci_name=$CI_NAME" >> "$GITHUB_OUTPUT"
+
       - uses: hashicorp/setup-terraform@v3
       - run: terraform -chdir=infra init
       - run: terraform -chdir=infra plan -var="release=${GITHUB_REF_NAME}" -no-color | tee plan.txt
@@ -29,7 +47,7 @@ jobs:
           tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
           context-github: ${{ toJSON(github) }}
           job-name: 'ServiceNow Change'
-          change-request: '{"setCloseCode":"true","autoCloseChange":true,"attributes":{"short_description":"Production release ${{ github.ref_name }}","description":"Terraform ${{ needs.plan.outputs.summary }}","assignment_group":"87d8f3fcc33c57906aff75dc0501317b"}}'
+          change-request: '{"setCloseCode":"true","autoCloseChange":true,"attributes":{"short_description":"Production release ${{ github.ref_name }}","description":"Terraform ${{ needs.plan.outputs.summary }}","assignment_group":"87d8f3fcc33c57906aff75dc0501317b","cmdb_ci":{"name":"${{ needs.plan.outputs.ci_name }}"}}}'
           interval: '30'
           timeout: '3600'
           changeCreationTimeOut: '3600'
