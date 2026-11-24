@@ -1,1 +1,1 @@
-# CCsample-demo
+Release configuration for CC demo
