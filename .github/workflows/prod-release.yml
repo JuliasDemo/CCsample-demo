@@ -4,15 +4,17 @@ on:
     tags: ['v*']
 
 env:
-  # Allowed primary CIs: key -> exact CI name in ServiceNow
-   CI_MAP: '{"app":"CC Order Service - Prod","aks":"aks-cc-order-prod-eus2-userpool","rg":"rg-cc-order-prod-eus2","gcp":"cc-order-analytics-prod"}'
+  CI_MAP: '{"app":"CC Order Service - Prod","aks":"aks-cc-order-prod-eus2-userpool","rg":"rg-cc-order-prod-eus2","gcp":"cc-order-analytics-prod"}'
+
 jobs:
   plan:
     name: Terraform Plan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
-      summary: ${{ steps.sum.outputs.summary }}
-      ci_name: ${{ steps.ci.outputs.ci_name }}
+      cr_payload: ${{ steps.payload.outputs.cr_payload }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,8 +33,62 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
       - run: terraform -chdir=infra init
       - run: terraform -chdir=infra plan -var="release=${GITHUB_REF_NAME}" -no-color | tee plan.txt
-      - id: sum
-        run: echo "summary=$(grep '^Plan:' plan.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Security scan (Checkov)
+        run: |
+          pip install checkov
+          checkov -d infra -o junitxml > checkov.xml || true
+
+      - name: Publish scan results to ServiceNow
+        uses: ServiceNow/servicenow-devops-test-report@v6.0.0
+        with:
+          devops-integration-token: ${{ secrets.SN_DEVOPS_INTEGRATION_TOKEN }}
+          instance-url: ${{ secrets.SN_INSTANCE_URL }}
+          tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
+          context-github: ${{ toJSON(github) }}
+          job-name: 'Terraform Plan'
+          xml-report-filename: checkov.xml
+
+      - name: Register artifact with ServiceNow
+        uses: ServiceNow/servicenow-devops-register-artifact@v3.1.0
+        with:
+          devops-integration-token: ${{ secrets.SN_DEVOPS_INTEGRATION_TOKEN }}
+          instance-url: ${{ secrets.SN_INSTANCE_URL }}
+          tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
+          context-github: ${{ toJSON(github) }}
+          job-name: 'Terraform Plan'
+          artifacts: '[{"name": "cc-order-service-infra", "version": "${{ github.ref_name }}", "semanticVersion": "${{ github.ref_name }}", "repositoryName": "${{ github.repository }}"}]'
+
+      - name: Build change payload
+        id: payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_NAME: ${{ steps.ci.outputs.ci_name }}
+        run: |
+          SUMMARY=$(grep '^Plan:' plan.txt || echo "Plan: no changes")
+          PR=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/pulls --jq '.[0] // {}')
+          NUM=$(echo "$PR" | jq -r '.number // empty')
+          APPROVERS="none"
+          if [ -n "$NUM" ]; then
+            APPROVERS=$(gh api repos/${{ github.repository }}/pulls/$NUM/reviews \
+              --jq '[.[] | select(.state=="APPROVED") | .user.login] | unique | join(", ")')
+            [ -z "$APPROVERS" ] && APPROVERS="none"
+          fi
+          PAYLOAD=$(jq -nc \
+            --arg tag "$GITHUB_REF_NAME" --arg summary "$SUMMARY" \
+            --arg approvers "$APPROVERS" --arg ci "$CI_NAME" --argjson pr "$PR" \
+            '{setCloseCode:"true", autoCloseChange:true, attributes:{
+               short_description: ("Production release " + $tag),
+               description: ("Terraform " + $summary
+                 + "\nPR #" + (($pr.number // "none") | tostring) + ": " + ($pr.title // "no PR found")
+                 + "\nAuthor: " + ($pr.user.login // "n/a")
+                 + "\nApproved by: " + $approvers
+                 + "\nSource branch: " + ($pr.head.ref // "n/a")
+                 + "\nPR link: " + ($pr.html_url // "n/a")),
+               assignment_group: "87d8f3fcc33c57906aff75dc0501317b",
+               cmdb_ci: {name: $ci}
+             }}')
+          echo "cr_payload=$PAYLOAD" >> "$GITHUB_OUTPUT"
 
   change:
     name: ServiceNow Change
@@ -46,7 +102,7 @@ jobs:
           tool-id: ${{ secrets.SN_ORCHESTRATION_TOOL_ID }}
           context-github: ${{ toJSON(github) }}
           job-name: 'ServiceNow Change'
-          change-request: '{"setCloseCode":"true","autoCloseChange":true,"attributes":{"short_description":"Production release ${{ github.ref_name }}","description":"Terraform ${{ needs.plan.outputs.summary }}","assignment_group":"87d8f3fcc33c57906aff75dc0501317b","cmdb_ci":{"name":"${{ needs.plan.outputs.ci_name }}"}}}'
+          change-request: ${{ needs.plan.outputs.cr_payload }}
           interval: '30'
           timeout: '3600'
           changeCreationTimeOut: '3600'
